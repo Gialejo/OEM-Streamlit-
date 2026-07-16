@@ -10,6 +10,7 @@ non deve mai far crashare l'arricchimento massivo delle altre.
 """
 
 import json
+import os
 import re
 
 import requests
@@ -22,14 +23,26 @@ YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_MAX_RESULTS = 3
 
 
+def get_secret(key: str) -> str | None:
+    """Legge una chiave prima da st.secrets (utile in locale, con secrets.toml),
+    poi da os.environ (utile su Render, dove le chiavi sono variabili d'ambiente
+    e non esiste alcun file secrets.toml nel repository)."""
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key)
+
+
 # --------------------------------------------------------------------------
 # Client Gemini (cache_resource: una sola istanza per sessione del server)
 # --------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_gemini_client():
-    api_key = st.secrets.get("GEMINI_API_KEY")
+    api_key = get_secret("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY mancante in st.secrets")
+        raise RuntimeError("GEMINI_API_KEY mancante (né in st.secrets né nelle variabili d'ambiente)")
     return genai.Client(api_key=api_key)
 
 
@@ -144,7 +157,7 @@ def search_youtube(nome: str) -> list[dict]:
     """Cerca video rilevanti su YouTube per l'azienda. Ritorna lista di dict
     {title, url, thumbnail, channel}. Ritorna lista vuota in caso di errore/quota
     esaurita, senza sollevare eccezioni verso il chiamante."""
-    api_key = st.secrets.get("YOUTUBE_API_KEY")
+    api_key = get_secret("YOUTUBE_API_KEY")
     if not api_key:
         return []
 
