@@ -18,7 +18,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-GEMINI_MODEL = "gemini-2.5-flash"  # cambia qui se vuoi un altro modello Gemini
+GEMINI_MODEL = "gemini-3.5-flash"  # modello Gemini stabile e economico (aggiornalo qui se Google lo cambia in futuro)
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_MAX_RESULTS = 3
 
