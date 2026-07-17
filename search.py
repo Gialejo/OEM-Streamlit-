@@ -20,7 +20,6 @@ FIELD_WEIGHTS = {
     "nome": 5.0,
     "descrizione_ai": 2.0,
     "descrizione_originale": 1.5,
-    "categoria_mecspe_display": 1.2,
     "settore_display": 1.0,
     "provincia": 0.8,
     "citta": 0.8,
