@@ -211,11 +211,6 @@ with st.sidebar:
     filter_opts = db.get_filter_options()
     regioni_sel = st.multiselect("Regione", options=filter_opts["regioni"])
     province_sel = st.multiselect("Provincia", options=filter_opts["province"])
-    categorie_mecspe_sel = st.multiselect(
-        "Categoria MECSPE",
-        options=filter_opts["categorie_mecspe"],
-        help="Tassonomia normalizzata delle categorie fiera MECSPE (vedi clean_database.py).",
-    )
 
     categorie_labels = {
         "OEM": "🟢 OEM",
@@ -282,7 +277,6 @@ def render_list_page():
         regioni=regioni_sel or None,
         province=province_sel or None,
         categorie_oem=categorie_sel or None,
-        categorie_mecspe=categorie_mecspe_sel or None,
         ha_descrizione=ha_descrizione,
         completezza_livelli=completezza_sel or None,
         solo_da_arricchire=solo_da_arricchire,
@@ -454,13 +448,6 @@ def render_detail_page():
         else:
             st.markdown("**Settore:** —")
 
-        cat_mecspe = azienda.get("categoria_mecspe")
-        if cat_mecspe:
-            try:
-                cat_mecspe = ", ".join(json.loads(cat_mecspe))
-            except Exception:
-                pass
-        st.markdown(f"**Categoria fiera (MECSPE):** {cat_mecspe or '—'}")
         st.markdown(f"**Regione:** {azienda.get('regione') or '—'}")
         st.markdown(f"**Provincia:** {azienda.get('provincia') or '—'}")
         st.markdown(f"**Città:** {azienda.get('citta') or '—'}")
