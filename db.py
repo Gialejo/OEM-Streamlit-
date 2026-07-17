@@ -40,7 +40,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from clean_database import RAW_TO_CLEAN_CATEGORIA
 from search import compute_relevance
 
 DB_PATH = Path(__file__).parent / "data" / "aziende.db"
@@ -183,10 +182,7 @@ def get_filter_options() -> dict:
         province = [r[0] for r in conn.execute(
             "SELECT DISTINCT provincia FROM aziende WHERE provincia IS NOT NULL AND provincia != '' ORDER BY provincia"
         ).fetchall()]
-    # La tassonomia canonica vive in clean_database.py: la riusiamo qui per
-    # evitare di duplicare la lista delle 13 categorie in due punti diversi.
-    categorie_mecspe = sorted(set(RAW_TO_CLEAN_CATEGORIA.values()))
-    return {"regioni": regioni, "province": province, "categorie_mecspe": categorie_mecspe}
+    return {"regioni": regioni, "province": province}
 
 
 def get_dataframe(
@@ -194,7 +190,6 @@ def get_dataframe(
     regioni: list | None = None,
     province: list | None = None,
     categorie_oem: list | None = None,
-    categorie_mecspe: list | None = None,
     ha_descrizione: bool | None = None,
     completezza_livelli: list | None = None,
     solo_da_arricchire: bool = False,
@@ -202,7 +197,7 @@ def get_dataframe(
 ) -> pd.DataFrame:
     """
     Restituisce le aziende che soddisfano i filtri strutturati (regione,
-    provincia, categoria OEM/MECSPE, presenza descrizione, completezza,
+    provincia, categoria OEM, presenza descrizione, completezza,
     stato arricchimento), applicati in SQL.
 
     Se 'search' e' valorizzato, il filtro testuale NON viene fatto in SQL:
@@ -237,15 +232,6 @@ def get_dataframe(
             query += f" AND categoria_oem IN ({placeholders})"
             params += categorie_oem
 
-    if categorie_mecspe:
-        # categoria_mecspe e' una lista JSON stringificata: verifichiamo la
-        # presenza della categoria come sottostringa tra virgolette.
-        conditions = []
-        for cat in categorie_mecspe:
-            conditions.append("categoria_mecspe LIKE ?")
-            params.append(f'%"{cat}"%')
-        query += " AND (" + " OR ".join(conditions) + ")"
-
     if ha_descrizione is True:
         query += " AND descrizione_originale IS NOT NULL AND descrizione_originale != ''"
     elif ha_descrizione is False:
@@ -272,15 +258,6 @@ def get_dataframe(
     return df
 
 
-def _categoria_mecspe_display(raw_json: str | None) -> str:
-    if not raw_json:
-        return ""
-    try:
-        return ", ".join(json.loads(raw_json))
-    except Exception:
-        return ""
-
-
 def _settore_display(row: pd.Series) -> str:
     if row.get("settore"):
         return row["settore"]
@@ -305,7 +282,6 @@ def _apply_smart_search(df: pd.DataFrame, search: str, limit: int) -> pd.DataFra
             "nome": row.get("nome"),
             "descrizione_ai": row.get("descrizione_ai"),
             "descrizione_originale": row.get("descrizione_originale"),
-            "categoria_mecspe_display": _categoria_mecspe_display(row.get("categoria_mecspe")),
             "settore_display": _settore_display(row),
             "provincia": row.get("provincia"),
             "citta": row.get("citta"),
