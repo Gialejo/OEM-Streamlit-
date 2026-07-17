@@ -168,6 +168,11 @@ if "page" not in st.session_state:
     st.session_state.page = "list"
 if "selected_id" not in st.session_state:
     st.session_state.selected_id = None
+if "search_eseguita" not in st.session_state:
+    # Finche' l'utente non ha premuto "Cerca aziende" almeno una volta, la
+    # pagina lista mostra solo la landing (nessun elenco), per non sovraccaricare
+    # subito l'app con 3300 righe. Vedi render_list_page().
+    st.session_state.search_eseguita = False
 
 
 def go_to_detail(azienda_id: int):
@@ -201,50 +206,59 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### 🔎 Filtri")
-    search = st.text_input(
-        "Cerca per nome, settore, categoria o descrizione",
-        value="",
-        placeholder="es. saldatura, packaging, robot...",
-        help="Ricerca smart: cerca in più campi insieme, tollera piccoli errori di battitura e accenti, e ordina i risultati per rilevanza.",
-    )
 
-    filter_opts = db.get_filter_options()
-    regioni_sel = st.multiselect("Regione", options=filter_opts["regioni"])
-    province_sel = st.multiselect("Provincia", options=filter_opts["province"])
+    # I filtri stanno in un form: niente rerun ad ogni tocco, i risultati si
+    # aggiornano solo quando l'utente preme "Cerca aziende" (vedi Fase 2:
+    # nessun elenco visibile finche' non si esegue una ricerca esplicita).
+    with st.form("filtri_form"):
+        search = st.text_input(
+            "Cerca per nome, settore, categoria o descrizione",
+            value="",
+            placeholder="es. saldatura, packaging, robot...",
+            help="Ricerca smart: cerca in più campi insieme, tollera piccoli errori di battitura e accenti, e ordina i risultati per rilevanza.",
+        )
 
-    categorie_labels = {
-        "OEM": "🟢 OEM",
-        "RIVENDITORE": "🟠 Rivenditore",
-        "END_USER": "🔵 End user",
-        "DA_VERIFICARE": "⚪ Da verificare",
-        "NON_ARRICCHITO": "⬜ Non arricchito",
-    }
-    categorie_sel_labels = st.multiselect(
-        "Categoria OEM (classificazione AI)",
-        options=list(categorie_labels.values()),
-    )
-    inv_labels = {v: k for k, v in categorie_labels.items()}
-    categorie_sel = [inv_labels[lbl] for lbl in categorie_sel_labels]
+        filter_opts = db.get_filter_options()
+        regioni_sel = st.multiselect("Regione", options=filter_opts["regioni"])
+        province_sel = st.multiselect("Provincia", options=filter_opts["province"])
 
-    descrizione_opt = st.radio(
-        "Descrizione originale",
-        options=["Tutte", "Solo con descrizione", "Solo senza descrizione"],
-        horizontal=False,
-    )
-    ha_descrizione = {"Tutte": None, "Solo con descrizione": True, "Solo senza descrizione": False}[descrizione_opt]
+        categorie_labels = {
+            "OEM": "🟢 OEM",
+            "RIVENDITORE": "🟠 Rivenditore",
+            "END_USER": "🔵 End user",
+            "DA_VERIFICARE": "⚪ Da verificare",
+            "NON_ARRICCHITO": "⬜ Non arricchito",
+        }
+        categorie_sel_labels = st.multiselect(
+            "Categoria OEM (classificazione AI)",
+            options=list(categorie_labels.values()),
+        )
+        inv_labels = {v: k for k, v in categorie_labels.items()}
+        categorie_sel = [inv_labels[lbl] for lbl in categorie_sel_labels]
 
-    completezza_labels = {liv: f'{s["emoji"]} {s["label"]}' for liv, s in enumerate(COMPLETEZZA_STYLE.values())}
-    completezza_sel_labels = st.multiselect(
-        "Completezza dati sorgente",
-        options=list(completezza_labels.values()),
-        help="Quanti campi (settore, categoria, regione, descrizione) sono valorizzati per l'azienda.",
-    )
-    inv_completezza = {v: k for k, v in completezza_labels.items()}
-    completezza_sel = [inv_completezza[lbl] for lbl in completezza_sel_labels]
+        descrizione_opt = st.radio(
+            "Descrizione originale",
+            options=["Tutte", "Solo con descrizione", "Solo senza descrizione"],
+            horizontal=False,
+        )
+        ha_descrizione = {"Tutte": None, "Solo con descrizione": True, "Solo senza descrizione": False}[descrizione_opt]
 
-    solo_da_arricchire = st.checkbox("Mostra solo aziende NON arricchite", value=False)
+        completezza_labels = {liv: f'{s["emoji"]} {s["label"]}' for liv, s in enumerate(COMPLETEZZA_STYLE.values())}
+        completezza_sel_labels = st.multiselect(
+            "Completezza dati sorgente",
+            options=list(completezza_labels.values()),
+            help="Quanti campi (settore, categoria, regione, descrizione) sono valorizzati per l'azienda.",
+        )
+        inv_completezza = {v: k for k, v in completezza_labels.items()}
+        completezza_sel = [inv_completezza[lbl] for lbl in completezza_sel_labels]
 
-    limit = st.slider("Righe massime da mostrare", min_value=50, max_value=2000, value=500, step=50)
+        solo_da_arricchire = st.checkbox("Mostra solo aziende NON arricchite", value=False)
+
+        limit = st.slider("Righe massime da mostrare", min_value=50, max_value=2000, value=500, step=50)
+
+        cercato = st.form_submit_button("🔍 Cerca aziende", type="primary", use_container_width=True)
+        if cercato:
+            st.session_state.search_eseguita = True
 
     st.markdown("---")
     stats = db.get_stats()
@@ -271,6 +285,21 @@ def render_list_page():
         """,
         unsafe_allow_html=True,
     )
+
+    if not st.session_state.search_eseguita:
+        st.info(
+            "👈 Imposta una parola chiave e/o dei filtri nella barra laterale, "
+            "poi premi **'🔍 Cerca aziende'** per vedere i risultati.\n\n"
+            "Il database contiene 3390 aziende: mostrarle tutte subito, senza "
+            "una ricerca, non aiuterebbe a trovare quella giusta."
+        )
+        return
+
+    col_reset, _ = st.columns([1, 4])
+    with col_reset:
+        if st.button("🔄 Nuova ricerca", use_container_width=True):
+            st.session_state.search_eseguita = False
+            st.rerun()
 
     df = db.get_dataframe(
         search=search,
