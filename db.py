@@ -5,10 +5,14 @@ Gestione del database SQLite per l'app OEM Explorer Italia.
 Schema tabella "aziende":
 - id                 : id originale dal JSON sorgente (PRIMARY KEY)
 - nome                (Ragione Sociale)
-- settore
-- categoria_mecspe    (JSON stringificato, lista di tag fiera)
+- settore             (settore originale, dal JSON sorgente)
+- settore_dedotto     (JSON stringificato: lista settori dedotti da keyword quando settore e' assente)
+- settore_fonte       ("originale" | "dedotto_keyword" | "assente")
+- categoria_mecspe    (JSON stringificato, lista di categorie MECSPE gia' normalizzate)
 - regione
 - descrizione_originale (Mini Descrizione grezza da scraping)
+- completezza_livello (0=ricca .. 3=solo nome, calcolato da clean_database.py)
+- completezza_label   ("ricca" | "parziale" | "scarsa" | "solo_nome")
 - provincia           (stimata via Gemini + Google Search grounding)
 - citta
 - sito_web
@@ -19,6 +23,13 @@ Schema tabella "aziende":
 - youtube_videos      (JSON stringificato: lista di {title, url, thumbnail, channel})
 - arricchito          (0/1)
 - arricchito_il       (timestamp ISO)
+
+Nota: il file sorgente e' data/database_aziende_clean.json, gia' normalizzato
+da clean_database.py (vedi quello script per la tassonomia categoria_mecspe
+e la logica di deduzione settore/completezza). Un JSON caricato manualmente
+dalla UI ("Carica/aggiorna JSON") dovrebbe essere gia' passato per quello
+script, altrimenti categoria_mecspe/settore_dedotto/completezza non saranno
+normalizzati.
 """
 
 import json
@@ -29,17 +40,24 @@ from pathlib import Path
 
 import pandas as pd
 
+from clean_database import RAW_TO_CLEAN_CATEGORIA
+from search import compute_relevance
+
 DB_PATH = Path(__file__).parent / "data" / "aziende.db"
-SOURCE_JSON_PATH = Path(__file__).parent / "data" / "database_aziende.json"
+SOURCE_JSON_PATH = Path(__file__).parent / "data" / "database_aziende_clean.json"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS aziende (
     id INTEGER PRIMARY KEY,
     nome TEXT NOT NULL,
     settore TEXT,
+    settore_dedotto TEXT,
+    settore_fonte TEXT,
     categoria_mecspe TEXT,
     regione TEXT,
     descrizione_originale TEXT,
+    completezza_livello INTEGER,
+    completezza_label TEXT,
     provincia TEXT,
     citta TEXT,
     sito_web TEXT,
@@ -77,13 +95,16 @@ def init_db():
 
 def import_json(file_or_path):
     """
-    Importa/aggiorna aziende da un file JSON con record del tipo:
+    Importa/aggiorna aziende da un file JSON gia' passato per clean_database.py,
+    con record del tipo:
     {"id": 1, "nome": "...", "settore": ..., "categoria_mecspe": [...],
-     "regione": ..., "descrizione": "..."}
+     "regione": ..., "descrizione": "...", "settore_dedotto": [...] | null,
+     "settore_fonte": "...", "completezza_livello": 0-3, "completezza_label": "..."}
 
     Fa un UPSERT sui campi "sorgente" (nome, settore, categoria_mecspe, regione,
-    descrizione_originale) senza toccare i campi già arricchiti, cosi' un
-    ricaricamento del JSON non cancella il lavoro di arricchimento già fatto.
+    descrizione_originale, settore_dedotto, settore_fonte, completezza_*) senza
+    toccare i campi gia' arricchiti (categoria_oem, descrizione_ai, ecc.), cosi'
+    un ricaricamento del JSON non cancella il lavoro di arricchimento gia' fatto.
     """
     if hasattr(file_or_path, "read"):
         data = json.load(file_or_path)
@@ -95,24 +116,42 @@ def import_json(file_or_path):
         for rec in data:
             categoria_mecspe = rec.get("categoria_mecspe")
             categoria_mecspe_json = json.dumps(categoria_mecspe, ensure_ascii=False) if categoria_mecspe else None
+            settore_dedotto = rec.get("settore_dedotto")
+            settore_dedotto_json = json.dumps(settore_dedotto, ensure_ascii=False) if settore_dedotto else None
             conn.execute(
                 """
-                INSERT INTO aziende (id, nome, settore, categoria_mecspe, regione, descrizione_originale)
-                VALUES (:id, :nome, :settore, :categoria_mecspe, :regione, :descrizione)
+                INSERT INTO aziende (
+                    id, nome, settore, settore_dedotto, settore_fonte,
+                    categoria_mecspe, regione, descrizione_originale,
+                    completezza_livello, completezza_label
+                )
+                VALUES (
+                    :id, :nome, :settore, :settore_dedotto, :settore_fonte,
+                    :categoria_mecspe, :regione, :descrizione,
+                    :completezza_livello, :completezza_label
+                )
                 ON CONFLICT(id) DO UPDATE SET
                     nome=excluded.nome,
                     settore=excluded.settore,
+                    settore_dedotto=excluded.settore_dedotto,
+                    settore_fonte=excluded.settore_fonte,
                     categoria_mecspe=excluded.categoria_mecspe,
                     regione=excluded.regione,
-                    descrizione_originale=excluded.descrizione_originale
+                    descrizione_originale=excluded.descrizione_originale,
+                    completezza_livello=excluded.completezza_livello,
+                    completezza_label=excluded.completezza_label
                 """,
                 {
                     "id": rec.get("id"),
                     "nome": rec.get("nome"),
                     "settore": rec.get("settore"),
+                    "settore_dedotto": settore_dedotto_json,
+                    "settore_fonte": rec.get("settore_fonte"),
                     "categoria_mecspe": categoria_mecspe_json,
                     "regione": rec.get("regione"),
                     "descrizione": rec.get("descrizione"),
+                    "completezza_livello": rec.get("completezza_livello"),
+                    "completezza_label": rec.get("completezza_label"),
                 },
             )
     return len(data)
@@ -125,12 +164,14 @@ def get_stats() -> dict:
         oem = conn.execute("SELECT COUNT(*) FROM aziende WHERE categoria_oem='OEM'").fetchone()[0]
         rivenditori = conn.execute("SELECT COUNT(*) FROM aziende WHERE categoria_oem='RIVENDITORE'").fetchone()[0]
         end_users = conn.execute("SELECT COUNT(*) FROM aziende WHERE categoria_oem='END_USER'").fetchone()[0]
+        solo_nome = conn.execute("SELECT COUNT(*) FROM aziende WHERE completezza_label='solo_nome'").fetchone()[0]
     return {
         "total": total,
         "arricchite": arricchite,
         "oem": oem,
         "rivenditori": rivenditori,
         "end_users": end_users,
+        "solo_nome": solo_nome,
     }
 
 
@@ -142,7 +183,10 @@ def get_filter_options() -> dict:
         province = [r[0] for r in conn.execute(
             "SELECT DISTINCT provincia FROM aziende WHERE provincia IS NOT NULL AND provincia != '' ORDER BY provincia"
         ).fetchall()]
-    return {"regioni": regioni, "province": province}
+    # La tassonomia canonica vive in clean_database.py: la riusiamo qui per
+    # evitare di duplicare la lista delle 13 categorie in due punti diversi.
+    categorie_mecspe = sorted(set(RAW_TO_CLEAN_CATEGORIA.values()))
+    return {"regioni": regioni, "province": province, "categorie_mecspe": categorie_mecspe}
 
 
 def get_dataframe(
@@ -150,16 +194,26 @@ def get_dataframe(
     regioni: list | None = None,
     province: list | None = None,
     categorie_oem: list | None = None,
+    categorie_mecspe: list | None = None,
+    ha_descrizione: bool | None = None,
+    completezza_livelli: list | None = None,
     solo_da_arricchire: bool = False,
     limit: int = 500,
 ) -> pd.DataFrame:
+    """
+    Restituisce le aziende che soddisfano i filtri strutturati (regione,
+    provincia, categoria OEM/MECSPE, presenza descrizione, completezza,
+    stato arricchimento), applicati in SQL.
+
+    Se 'search' e' valorizzato, il filtro testuale NON viene fatto in SQL:
+    si carica il sottoinsieme gia' filtrato (al massimo ~3300 righe, che
+    stanno comodamente in memoria) e si applica un ranking di rilevanza in
+    Python tollerante ad accenti/typo e pesato su piu' campi (vedi
+    search.compute_relevance), ordinando per rilevanza decrescente. Senza
+    ricerca testuale l'ordinamento resta alfabetico per nome.
+    """
     query = "SELECT * FROM aziende WHERE 1=1"
     params: list = []
-
-    if search:
-        query += " AND (nome LIKE ? OR descrizione_originale LIKE ? OR descrizione_ai LIKE ?)"
-        like = f"%{search}%"
-        params += [like, like, like]
 
     if regioni:
         query += f" AND regione IN ({','.join('?' * len(regioni))})"
@@ -183,15 +237,84 @@ def get_dataframe(
             query += f" AND categoria_oem IN ({placeholders})"
             params += categorie_oem
 
+    if categorie_mecspe:
+        # categoria_mecspe e' una lista JSON stringificata: verifichiamo la
+        # presenza della categoria come sottostringa tra virgolette.
+        conditions = []
+        for cat in categorie_mecspe:
+            conditions.append("categoria_mecspe LIKE ?")
+            params.append(f'%"{cat}"%')
+        query += " AND (" + " OR ".join(conditions) + ")"
+
+    if ha_descrizione is True:
+        query += " AND descrizione_originale IS NOT NULL AND descrizione_originale != ''"
+    elif ha_descrizione is False:
+        query += " AND (descrizione_originale IS NULL OR descrizione_originale = '')"
+
+    if completezza_livelli:
+        query += f" AND completezza_livello IN ({','.join('?' * len(completezza_livelli))})"
+        params += completezza_livelli
+
     if solo_da_arricchire:
         query += " AND arricchito = 0"
 
-    query += " ORDER BY nome ASC LIMIT ?"
-    params.append(limit)
+    query += " ORDER BY nome ASC"
+    if not search:
+        query += " LIMIT ?"
+        params.append(limit)
 
     with get_conn() as conn:
         df = pd.read_sql_query(query, conn, params=params)
+
+    if search:
+        df = _apply_smart_search(df, search, limit)
+
     return df
+
+
+def _categoria_mecspe_display(raw_json: str | None) -> str:
+    if not raw_json:
+        return ""
+    try:
+        return ", ".join(json.loads(raw_json))
+    except Exception:
+        return ""
+
+
+def _settore_display(row: pd.Series) -> str:
+    if row.get("settore"):
+        return row["settore"]
+    if row.get("settore_dedotto"):
+        try:
+            return ", ".join(json.loads(row["settore_dedotto"]))
+        except Exception:
+            return ""
+    return ""
+
+
+def _apply_smart_search(df: pd.DataFrame, search: str, limit: int) -> pd.DataFrame:
+    """Applica il ranking di rilevanza (search.compute_relevance) al dataframe
+    gia' filtrato strutturalmente, tenendo solo i risultati pertinenti
+    ordinati per punteggio decrescente."""
+    if df.empty:
+        return df
+
+    scores = []
+    for _, row in df.iterrows():
+        record = {
+            "nome": row.get("nome"),
+            "descrizione_ai": row.get("descrizione_ai"),
+            "descrizione_originale": row.get("descrizione_originale"),
+            "categoria_mecspe_display": _categoria_mecspe_display(row.get("categoria_mecspe")),
+            "settore_display": _settore_display(row),
+            "provincia": row.get("provincia"),
+            "citta": row.get("citta"),
+        }
+        scores.append(compute_relevance(record, search))
+
+    df = df.assign(_relevance=scores)
+    df = df[df["_relevance"] > 0].sort_values("_relevance", ascending=False)
+    return df.drop(columns="_relevance").head(limit)
 
 
 def get_by_id(azienda_id: int) -> dict | None:
