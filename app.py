@@ -31,6 +31,16 @@ CATEGORY_STYLE = {
     None: {"emoji": "⬜", "label": "Non arricchito", "color": "#9ca3af", "bg": "#fafafa"},
 }
 
+# Livello di completezza dei dati sorgente (calcolato da clean_database.py):
+# distingue le aziende con dati ricchi da quelle "solo nome", per cui l'unico
+# modo di sapere qualcosa e' arricchirle via AI.
+COMPLETEZZA_STYLE = {
+    "ricca": {"emoji": "🟩", "label": "Dati ricchi"},
+    "parziale": {"emoji": "🟨", "label": "Dati parziali"},
+    "scarsa": {"emoji": "🟧", "label": "Dati scarsi"},
+    "solo_nome": {"emoji": "⬛", "label": "Solo nome"},
+}
+
 CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -144,6 +154,11 @@ def pill_html(categoria: str | None) -> str:
     return f'<span class="pill" style="background:{s["bg"]};color:{s["color"]}">{s["emoji"]} {s["label"]}</span>'
 
 
+def completezza_badge(completezza_label: str | None) -> str:
+    s = COMPLETEZZA_STYLE.get(completezza_label, COMPLETEZZA_STYLE["solo_nome"])
+    return f'{s["emoji"]} {s["label"]}'
+
+
 # --------------------------------------------------------------------------
 # Init DB + session state
 # --------------------------------------------------------------------------
@@ -186,11 +201,21 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### 🔎 Filtri")
-    search = st.text_input("Cerca per nome o descrizione", value="", placeholder="es. saldatura, packaging, robot...")
+    search = st.text_input(
+        "Cerca per nome, settore, categoria o descrizione",
+        value="",
+        placeholder="es. saldatura, packaging, robot...",
+        help="Ricerca smart: cerca in più campi insieme, tollera piccoli errori di battitura e accenti, e ordina i risultati per rilevanza.",
+    )
 
     filter_opts = db.get_filter_options()
     regioni_sel = st.multiselect("Regione", options=filter_opts["regioni"])
     province_sel = st.multiselect("Provincia", options=filter_opts["province"])
+    categorie_mecspe_sel = st.multiselect(
+        "Categoria MECSPE",
+        options=filter_opts["categorie_mecspe"],
+        help="Tassonomia normalizzata delle categorie fiera MECSPE (vedi clean_database.py).",
+    )
 
     categorie_labels = {
         "OEM": "🟢 OEM",
@@ -200,11 +225,27 @@ with st.sidebar:
         "NON_ARRICCHITO": "⬜ Non arricchito",
     }
     categorie_sel_labels = st.multiselect(
-        "Categoria",
+        "Categoria OEM (classificazione AI)",
         options=list(categorie_labels.values()),
     )
     inv_labels = {v: k for k, v in categorie_labels.items()}
     categorie_sel = [inv_labels[lbl] for lbl in categorie_sel_labels]
+
+    descrizione_opt = st.radio(
+        "Descrizione originale",
+        options=["Tutte", "Solo con descrizione", "Solo senza descrizione"],
+        horizontal=False,
+    )
+    ha_descrizione = {"Tutte": None, "Solo con descrizione": True, "Solo senza descrizione": False}[descrizione_opt]
+
+    completezza_labels = {liv: f'{s["emoji"]} {s["label"]}' for liv, s in enumerate(COMPLETEZZA_STYLE.values())}
+    completezza_sel_labels = st.multiselect(
+        "Completezza dati sorgente",
+        options=list(completezza_labels.values()),
+        help="Quanti campi (settore, categoria, regione, descrizione) sono valorizzati per l'azienda.",
+    )
+    inv_completezza = {v: k for k, v in completezza_labels.items()}
+    completezza_sel = [inv_completezza[lbl] for lbl in completezza_sel_labels]
 
     solo_da_arricchire = st.checkbox("Mostra solo aziende NON arricchite", value=False)
 
@@ -218,7 +259,8 @@ with st.sidebar:
     c2.metric("Arricchite", stats["arricchite"])
     c1.metric("🟢 OEM", stats["oem"])
     c2.metric("🟠 Rivenditori", stats["rivenditori"])
-    st.metric("🔵 End user", stats["end_users"])
+    c1.metric("🔵 End user", stats["end_users"])
+    c2.metric("⬛ Solo nome", stats["solo_nome"])
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +282,9 @@ def render_list_page():
         regioni=regioni_sel or None,
         province=province_sel or None,
         categorie_oem=categorie_sel or None,
+        categorie_mecspe=categorie_mecspe_sel or None,
+        ha_descrizione=ha_descrizione,
+        completezza_livelli=completezza_sel or None,
         solo_da_arricchire=solo_da_arricchire,
         limit=limit,
     )
@@ -254,6 +299,7 @@ def render_list_page():
         "Regione": df["regione"].fillna("—"),
         "Provincia": df["provincia"].fillna("—"),
         "Categoria": df["categoria_oem"].map(lambda c: CATEGORY_STYLE.get(c, CATEGORY_STYLE[None])["emoji"] + " " + CATEGORY_STYLE.get(c, CATEGORY_STYLE[None])["label"]),
+        "Completezza": df["completezza_label"].map(completezza_badge),
         "Descrizione": df["descrizione_ai"].fillna(df["descrizione_originale"]).fillna("").str.slice(0, 140),
         "Arricchito": df["arricchito"].map(lambda x: "✅" if x == 1 else "⬜"),
     })
@@ -394,7 +440,20 @@ def render_detail_page():
     with col2:
         st.markdown('<div class="detail-card">', unsafe_allow_html=True)
         st.markdown("#### ℹ️ Informazioni")
-        st.markdown(f"**Settore:** {azienda.get('settore') or '—'}")
+        st.markdown(f"**Completezza dati sorgente:** {completezza_badge(azienda.get('completezza_label'))}")
+
+        settore_fonte = azienda.get("settore_fonte")
+        if azienda.get("settore"):
+            st.markdown(f"**Settore:** {azienda['settore']}")
+        elif settore_fonte == "dedotto_keyword" and azienda.get("settore_dedotto"):
+            try:
+                settore_dedotto = ", ".join(json.loads(azienda["settore_dedotto"]))
+            except Exception:
+                settore_dedotto = azienda["settore_dedotto"]
+            st.markdown(f"**Settore:** {settore_dedotto} *(dedotto automaticamente dalla descrizione, non certificato)*")
+        else:
+            st.markdown("**Settore:** —")
+
         cat_mecspe = azienda.get("categoria_mecspe")
         if cat_mecspe:
             try:
